@@ -19,6 +19,17 @@ topic() {
 install_system_deps() {
 	topic "Installing System Dependencies"
 
+	# Switch apt mirror to AWS regional mirror (us-east-1, S3-backed,
+	# in-region with Heroku). Avoids dependency on archive.ubuntu.com,
+	# which has had connectivity outages and severe throttling that
+	# break Playwright builds (see Canonical incident 2026-05-04).
+	if [ -f /etc/apt/sources.list ]; then
+		topic "Switching apt mirror to us-east-1.ec2.archive.ubuntu.com"
+		sed -i 's|http://archive\.ubuntu\.com/ubuntu|http://us-east-1.ec2.archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list 2>/dev/null \
+			|| sudo sed -i 's|http://archive\.ubuntu\.com/ubuntu|http://us-east-1.ec2.archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list \
+			|| echo "Warning: could not rewrite /etc/apt/sources.list; continuing with default mirror"
+	fi
+
 	APT_BUILDPACK="https://github.com/heroku/heroku-buildpack-apt"
 	local buildpack_tmpdir=$(mktemp -d)
 	cd $buildpack_tmpdir && git clone $APT_BUILDPACK .
