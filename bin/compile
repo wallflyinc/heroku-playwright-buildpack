@@ -23,6 +23,46 @@ install_system_deps() {
 	local buildpack_tmpdir=$(mktemp -d)
 	cd $buildpack_tmpdir && git clone $APT_BUILDPACK .
 
+	# Swap archive.ubuntu.com -> us-east-1.ec2.archive.ubuntu.com (AWS-hosted,
+	# S3-backed, in-region with Heroku, byte-for-byte identical to the canonical
+	# mirror). archive.ubuntu.com is a single point of failure that has caused
+	# multi-hour build outages (Canonical incident 2026-05-04). We patch the
+	# cloned apt buildpack's compile script rather than /etc/apt/{sources.list,
+	# sources.list.d/*} because the build user is unprivileged and cannot modify
+	# system files. heroku-buildpack-apt copies both into a temp dir it owns;
+	# we transform URLs during that copy so apt-get reads the rewritten mirror.
+	#
+	# Heroku-24 (Ubuntu Noble) stores its main Ubuntu repo config in deb822
+	# format at /etc/apt/sources.list.d/ubuntu.sources (not /etc/apt/sources.list,
+	# which is empty), so we must transform both paths.
+	topic "Patching apt buildpack to use us-east-1.ec2.archive.ubuntu.com mirror"
+	python3 - <<'PYEOF'
+import sys
+path = "bin/compile"
+patches = [
+    (
+        'cat "/etc/apt/sources.list" > "$APT_SOURCES"',
+        'sed "s|http://archive.ubuntu.com/ubuntu|http://us-east-1.ec2.archive.ubuntu.com/ubuntu|g" "/etc/apt/sources.list" > "$APT_SOURCES"',
+    ),
+    (
+        'cp -R "/etc/apt/sources.list.d" "$APT_SOURCEPARTS_DIR"',
+        ('cp -R "/etc/apt/sources.list.d" "$APT_SOURCEPARTS_DIR"\n'
+         '  find "$APT_SOURCEPARTS_DIR" -type f -exec sed -i '
+         '"s|http://archive.ubuntu.com/ubuntu|http://us-east-1.ec2.archive.ubuntu.com/ubuntu|g" {} +'),
+    ),
+]
+with open(path) as f:
+    contents = f.read()
+for old, new in patches:
+    if old not in contents:
+        sys.exit(f"Mirror swap aborted: expected pattern not found in {path}: {old!r}. "
+                 "heroku-buildpack-apt upstream may have changed; review and update the patch.")
+    contents = contents.replace(old, new, 1)
+with open(path, "w") as f:
+    f.write(contents)
+print("Mirror swap applied: apt buildpack will rewrite archive.ubuntu.com -> us-east-1.ec2.archive.ubuntu.com in both sources.list and sources.list.d/")
+PYEOF
+
 	local build_tmpdir=$(mktemp -d)
 	mkdir -p $build_tmpdir
 
