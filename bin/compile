@@ -19,20 +19,33 @@ topic() {
 install_system_deps() {
 	topic "Installing System Dependencies"
 
-	# Switch apt mirror to AWS regional mirror (us-east-1, S3-backed,
-	# in-region with Heroku). Avoids dependency on archive.ubuntu.com,
-	# which has had connectivity outages and severe throttling that
-	# break Playwright builds (see Canonical incident 2026-05-04).
-	if [ -f /etc/apt/sources.list ]; then
-		topic "Switching apt mirror to us-east-1.ec2.archive.ubuntu.com"
-		sed -i 's|http://archive\.ubuntu\.com/ubuntu|http://us-east-1.ec2.archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list 2>/dev/null \
-			|| sudo sed -i 's|http://archive\.ubuntu\.com/ubuntu|http://us-east-1.ec2.archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list \
-			|| echo "Warning: could not rewrite /etc/apt/sources.list; continuing with default mirror"
-	fi
-
 	APT_BUILDPACK="https://github.com/heroku/heroku-buildpack-apt"
 	local buildpack_tmpdir=$(mktemp -d)
 	cd $buildpack_tmpdir && git clone $APT_BUILDPACK .
+
+	# Swap archive.ubuntu.com -> us-east-1.ec2.archive.ubuntu.com (AWS-hosted,
+	# S3-backed, in-region with Heroku, byte-for-byte identical to the canonical
+	# mirror). archive.ubuntu.com is a single point of failure that has caused
+	# multi-hour build outages (Canonical incident 2026-05-04). We patch the
+	# cloned apt buildpack's compile script rather than /etc/apt/sources.list
+	# because the build user is unprivileged and cannot modify system files.
+	# heroku-buildpack-apt copies /etc/apt/sources.list into a temp dir it owns;
+	# we transform URLs during that copy so apt-get reads the rewritten mirror.
+	topic "Patching apt buildpack to use us-east-1.ec2.archive.ubuntu.com mirror"
+	python3 - <<'PYEOF'
+import sys
+path = "bin/compile"
+old = 'cat "/etc/apt/sources.list" > "$APT_SOURCES"'
+new = 'sed "s|http://archive.ubuntu.com/ubuntu|http://us-east-1.ec2.archive.ubuntu.com/ubuntu|g" "/etc/apt/sources.list" > "$APT_SOURCES"'
+with open(path) as f:
+    contents = f.read()
+if old not in contents:
+    sys.exit(f"Mirror swap aborted: expected pattern not found in {path}. "
+             "heroku-buildpack-apt upstream may have changed; review and update the patch.")
+with open(path, "w") as f:
+    f.write(contents.replace(old, new, 1))
+print("Mirror swap applied: apt buildpack will rewrite archive.ubuntu.com -> us-east-1.ec2.archive.ubuntu.com")
+PYEOF
 
 	local build_tmpdir=$(mktemp -d)
 	mkdir -p $build_tmpdir
